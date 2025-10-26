@@ -13,6 +13,7 @@ class UserAdmin(admin.ModelAdmin):
         "phone",
         "is_member",
         "is_sacco_admin",
+        "is_approved",
     )
 
     search_fields = ("member_number", "name", "email", "phone")

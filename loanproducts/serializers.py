@@ -21,6 +21,7 @@ class LoanProductSerializer(serializers.ModelSerializer):
             "compounding_frequency",
             "description",
             "currency",
+            "is_active",
             "created_at",
             "updated_at",
             "reference",
