@@ -8,4 +8,4 @@ class LoanProductAdmin(admin.ModelAdmin):
     search_fields = ("name", "interest_rate", "interest_type", "interest_period")
 
 
-admin.site.register(LoanProduct)
+admin.site.register(LoanProduct, LoanProductAdmin)

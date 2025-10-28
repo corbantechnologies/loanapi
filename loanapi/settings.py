@@ -37,6 +37,8 @@ INSTALLED_APPS = [
     # Local apps
     "accounts",
     "loanproducts",
+    "loanaccounts",
+    "interests"
 ]
 
 MIDDLEWARE = [
