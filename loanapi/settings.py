@@ -38,7 +38,9 @@ INSTALLED_APPS = [
     "accounts",
     "loanproducts",
     "loanaccounts",
-    "interests"
+    "interests",
+    "loanapplications",
+    "repayments",
 ]
 
 MIDDLEWARE = [

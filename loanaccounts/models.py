@@ -30,6 +30,13 @@ class LoanAccount(UniversalIdModel, TimeStampedModel, ReferenceModel):
     end_date = models.DateField()
     last_interest_calulation = models.DateField(null=True, blank=True)
     status = models.CharField(choices=STATUS_CHOICES, default="Active", max_length=20)
+    total_interest_accrued = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0
+    )
+    total_principal_paid = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0
+    )
+    total_amount_paid = models.DecimalField(max_digits=15, decimal_places=2, default=0)
 
     class Meta:
         verbose_name = "Loan Account"
