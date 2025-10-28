@@ -1,53 +1,51 @@
+# serializers.py
 from rest_framework import serializers
-
-from loanapplications.models import LoanApplication
 from loanproducts.models import LoanProduct
-
-
-# class LoanApplicationSerializer(serializers.ModelSerializer):
-#     member = serializers.CharField(source="member.member_number")
-#     product = serializers.SlugRelatedField(
-#         slug_field="name", queryset=LoanProduct.objects.all()
-#     )
-
-#     class Meta:
-#         model = LoanApplication
-#         fields = (
-#             "member",
-#             "product",
-#             "requested_amount",
-#             "term_months",
-#             "repayment_frequency",
-#             "status",
-#             "projection_snapshot",
-#             "created_at",
-#             "updated_at",
-#             "reference",
-#         )
+from loanapplications.models import LoanApplication
 
 
 class LoanApplicationSerializer(serializers.Serializer):
-    """
-    Used for input validation in projection & application creation.
-    Only includes fields needed for projection.
-    """
-
     product = serializers.SlugRelatedField(
         slug_field="name",
         queryset=LoanProduct.objects.filter(is_active=True),
-        help_text="Name of the loan product",
     )
     requested_amount = serializers.DecimalField(
-        max_digits=15, decimal_places=2, min_value=0
+        max_digits=15, decimal_places=2, min_value=1
     )
-    term_months = serializers.IntegerField(min_value=1, max_value=360)
+
+    term_months = serializers.IntegerField(min_value=1, max_value=360, required=False)
+    monthly_payment = serializers.DecimalField(
+        max_digits=15, decimal_places=2, min_value=1, required=False
+    )
+
     repayment_frequency = serializers.ChoiceField(
         choices=LoanApplication.REPAYMENT_FREQUENCY_CHOICES, default="monthly"
     )
-
-    # Optional: start_date (not stored, just for projection)
     start_date = serializers.DateField(required=False)
 
-    class Meta:
-        # No model binding — this is a **projection input serializer**
-        pass
+    def validate(self, data):
+        term = data.get("term_months")
+        payment = data.get("monthly_payment")
+        product = data.get("product")
+
+        if not term and not payment:
+            raise serializers.ValidationError(
+                "Either 'term_months' or 'monthly_payment' is required."
+            )
+        if term and payment:
+            raise serializers.ValidationError(
+                "Provide either 'term_months' OR 'monthly_payment', not both."
+            )
+
+        if product.interest_type == "flat":
+            if payment:
+                raise serializers.ValidationError(
+                    "Flat rate loans require 'term_months'. Interest is fixed upfront — monthly_payment is not applicable."
+                )
+        else:
+            if term:
+                raise serializers.ValidationError(
+                    f"'{product.interest_type}' loans require 'monthly_payment'. "
+                    "Use fixed payment to calculate term and total interest."
+                )
+        return data

@@ -29,7 +29,7 @@ class LoanApplication(UniversalIdModel, TimeStampedModel, ReferenceModel):
     )
     product = models.ForeignKey(LoanProduct, on_delete=models.PROTECT)
     requested_amount = models.DecimalField(max_digits=15, decimal_places=2)
-    term_months = models.PositiveIntegerField()
+    term_months = models.PositiveIntegerField(blank=True, null=True)
     repayment_frequency = models.CharField(
         max_length=20,
         choices=REPAYMENT_FREQUENCY_CHOICES,

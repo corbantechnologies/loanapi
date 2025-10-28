@@ -3,10 +3,14 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from typing import Dict, List
+
 from loanproducts.models import LoanProduct
 
 
-class LoanProjector:
+# ----------------------------------------------------------------------
+#  COMMON HELPERS (shared by all projectors)
+# ----------------------------------------------------------------------
+class _BaseProjector:
     FREQUENCY_TO_DELTA = {
         "daily": relativedelta(days=1),
         "weekly": relativedelta(weeks=1),
@@ -16,235 +20,6 @@ class LoanProjector:
         "annually": relativedelta(years=1),
     }
 
-    @staticmethod
-    def generate_projection(
-        product: LoanProduct,
-        principal: Decimal,
-        term_months: int,
-        start_date: date,
-        repayment_frequency: str = "monthly",
-    ) -> Dict:
-        if repayment_frequency not in LoanProjector.FREQUENCY_TO_DELTA:
-            raise ValueError(f"Invalid repayment frequency: {repayment_frequency}")
-
-        payment_delta = LoanProjector.FREQUENCY_TO_DELTA[repayment_frequency]
-        interest_delta = LoanProjector.FREQUENCY_TO_DELTA[product.interest_period]
-
-        total_payments = LoanProjector._count_payments(term_months, repayment_frequency)
-        if total_payments == 0:
-            raise ValueError("Invalid term or frequency combination")
-
-        rate = product.interest_rate / Decimal("100")
-        schedule = []
-        current_balance = principal
-        total_interest = Decimal("0")
-        cur_date = start_date
-
-        # ===================================================================
-        # 1. FLAT RATE: Total interest = P × R × T (in years)
-        # ===================================================================
-        if product.interest_type == "flat":
-            total_interest = (
-                principal * rate * Decimal(term_months) / Decimal("12")
-            ).quantize(Decimal("0.01"), ROUND_HALF_UP)
-            total_repayment = principal + total_interest
-            payment_amount = (total_repayment / Decimal(total_payments)).quantize(
-                Decimal("0.01"), ROUND_HALF_UP
-            )
-            interest_per_payment = (total_interest / Decimal(total_payments)).quantize(
-                Decimal("0.01"), ROUND_HALF_UP
-            )
-            principal_per_payment = payment_amount - interest_per_payment
-
-            remaining_principal = principal
-
-            for i in range(total_payments):
-                if i == total_payments - 1:  # Last payment
-                    principal_due = remaining_principal
-                    interest_due = interest_per_payment
-                    total_due = principal_due + interest_due
-                else:
-                    principal_due = principal_per_payment
-                    interest_due = interest_per_payment
-                    total_due = payment_amount
-
-                remaining_principal = max(
-                    remaining_principal - principal_due, Decimal("0")
-                )
-
-                schedule.append(
-                    {
-                        "due_date": cur_date.isoformat(),
-                        "principal_due": float(principal_due),
-                        "interest_due": float(interest_due),
-                        "total_due": float(total_due),
-                        "balance_after": float(remaining_principal),
-                    }
-                )
-                cur_date += payment_delta
-
-            return {
-                "repayment_frequency": repayment_frequency,
-                "total_payments": total_payments,
-                "payment_amount": float(payment_amount),
-                "total_interest": float(total_interest),
-                "total_repayment": float(total_repayment),
-                "schedule": schedule,
-                "breakdown_by_period": LoanProjector._group_by_period(
-                    schedule, repayment_frequency
-                ),
-            }
-
-        # ===================================================================
-        # 2. DIMINISHING BALANCE: Interest on current balance
-        # ===================================================================
-        elif product.interest_type == "diminishing":
-            monthly_rate = rate / Decimal("12")
-            emi = LoanProjector._pmt(principal, monthly_rate, term_months)
-            payment_per_period = emi * Decimal(
-                LoanProjector._months_per_period(repayment_frequency)
-            )
-
-            interest_accrued = Decimal("0")
-            last_interest_calc = start_date
-
-            for i in range(total_payments):
-                due_date = cur_date
-
-                # Accrue interest up to payment date
-                interest_this_period = Decimal("0")
-                while last_interest_calc < due_date:
-                    calc_to = min(last_interest_calc + interest_delta, due_date)
-                    time_frac = LoanProjector._time_fraction(
-                        last_interest_calc, calc_to, product.interest_period
-                    )
-                    period_interest = (current_balance * rate * time_frac).quantize(
-                        Decimal("0.01"), ROUND_HALF_UP
-                    )
-                    interest_accrued += period_interest
-                    interest_this_period += period_interest
-                    last_interest_calc = calc_to
-
-                # Apply payment
-                interest_due = min(interest_accrued, payment_per_period)
-                principal_due = payment_per_period - interest_due
-
-                if i == total_payments - 1:  # Last payment
-                    principal_due = current_balance
-                    total_due = principal_due + interest_accrued
-                else:
-                    total_due = payment_per_period
-
-                current_balance = max(current_balance - principal_due, Decimal("0"))
-                interest_accrued = max(interest_accrued - interest_due, Decimal("0"))
-                total_interest += interest_due
-
-                schedule.append(
-                    {
-                        "due_date": due_date.isoformat(),
-                        "principal_due": float(principal_due),
-                        "interest_due": float(interest_due),
-                        "total_due": float(total_due),
-                        "balance_after": float(current_balance),
-                    }
-                )
-                cur_date += payment_delta
-
-            total_repayment = principal + total_interest
-            return {
-                "repayment_frequency": repayment_frequency,
-                "total_payments": total_payments,
-                "payment_amount": float(payment_per_period.quantize(Decimal("0.01"))),
-                "total_interest": float(total_interest.quantize(Decimal("0.01"))),
-                "total_repayment": float(total_repayment.quantize(Decimal("0.01"))),
-                "schedule": schedule,
-                "breakdown_by_period": LoanProjector._group_by_period(
-                    schedule, repayment_frequency
-                ),
-            }
-
-        # ===================================================================
-        # 3. COMPOUND & CAPITALIZED
-        # ===================================================================
-        elif product.interest_type in ["compound", "capitalized"]:
-            n = Decimal(str(product.compounding_frequency or 1))
-            interest_accrued = Decimal("0")
-            last_interest_calc = start_date
-
-            for i in range(total_payments):
-                due_date = cur_date
-
-                # Accrue compound interest
-                interest_this_period = Decimal("0")
-                while last_interest_calc < due_date:
-                    calc_to = min(last_interest_calc + interest_delta, due_date)
-                    time_frac = LoanProjector._time_fraction(
-                        last_interest_calc, calc_to, product.interest_period
-                    )
-                    period_interest = current_balance * (
-                        (Decimal("1") + rate / n) ** (n * time_frac) - Decimal("1")
-                    )
-                    period_interest = period_interest.quantize(
-                        Decimal("0.01"), ROUND_HALF_UP
-                    )
-
-                    interest_accrued += period_interest
-                    interest_this_period += period_interest
-                    last_interest_calc = calc_to
-
-                    if product.interest_type == "capitalized":
-                        current_balance += period_interest
-
-                # Payment: only interest (principal at end or separate)
-                interest_due = interest_this_period
-                principal_due = Decimal("0")
-                total_due = interest_due
-
-                total_interest += interest_due
-
-                schedule.append(
-                    {
-                        "due_date": due_date.isoformat(),
-                        "principal_due": float(principal_due),
-                        "interest_due": float(interest_due),
-                        "total_due": float(total_due),
-                        "balance_after": float(current_balance),
-                    }
-                )
-                cur_date += payment_delta
-
-            # Optional: Add final principal repayment
-            if product.interest_type == "compound":
-                schedule.append(
-                    {
-                        "due_date": cur_date.isoformat(),
-                        "principal_due": float(principal),
-                        "interest_due": 0.0,
-                        "total_due": float(principal),
-                        "balance_after": 0.0,
-                    }
-                )
-
-            total_repayment = principal + total_interest
-            return {
-                "repayment_frequency": repayment_frequency,
-                "total_payments": total_payments
-                + (1 if product.interest_type == "compound" else 0),
-                "payment_amount": None,  # Interest-only
-                "total_interest": float(total_interest.quantize(Decimal("0.01"))),
-                "total_repayment": float(total_repayment.quantize(Decimal("0.01"))),
-                "schedule": schedule,
-                "breakdown_by_period": LoanProjector._group_by_period(
-                    schedule, repayment_frequency
-                ),
-            }
-
-        else:
-            raise ValueError(f"Unsupported interest type: {product.interest_type}")
-
-    # ===================================================================
-    # Helper Methods
-    # ===================================================================
     @staticmethod
     def _count_payments(term_months: int, frequency: str) -> int:
         mapping = {
@@ -304,3 +79,276 @@ class LoanProjector:
             {"period": k, **{k2: round(v2, 2) for k2, v2 in v.items()}}
             for k, v in sorted(groups.items())
         ]
+
+
+# ----------------------------------------------------------------------
+#  1. FLAT RATE PROJECTOR
+# ----------------------------------------------------------------------
+class FlatRateProjector(_BaseProjector):
+    @staticmethod
+    def generate_projection(
+        product: LoanProduct,
+        principal: Decimal,
+        term_months: int,
+        start_date: date,
+        repayment_frequency: str = "monthly",
+    ) -> Dict:
+        payment_delta = FlatRateProjector.FREQUENCY_TO_DELTA[repayment_frequency]
+        total_payments = FlatRateProjector._count_payments(
+            term_months, repayment_frequency
+        )
+
+        rate = product.interest_rate / Decimal("100")
+        total_interest = (
+            principal * rate * Decimal(term_months) / Decimal("12")
+        ).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        total_repayment = principal + total_interest
+        payment_amount = (total_repayment / Decimal(total_payments)).quantize(
+            Decimal("0.01"), ROUND_HALF_UP
+        )
+        interest_per_payment = (total_interest / Decimal(total_payments)).quantize(
+            Decimal("0.01"), ROUND_HALF_UP
+        )
+        principal_per_payment = payment_amount - interest_per_payment
+
+        schedule = []
+        remaining_principal = principal
+        cur_date = start_date
+
+        for i in range(total_payments):
+            if i == total_payments - 1:  # last payment
+                principal_due = remaining_principal
+                interest_due = interest_per_payment
+                total_due = principal_due + interest_due
+            else:
+                principal_due = principal_per_payment
+                interest_due = interest_per_payment
+                total_due = payment_amount
+
+            remaining_principal = max(remaining_principal - principal_due, Decimal("0"))
+
+            schedule.append(
+                {
+                    "due_date": cur_date.isoformat(),
+                    "principal_due": float(principal_due),
+                    "interest_due": float(interest_due),
+                    "total_due": float(total_due),
+                    "balance_after": float(remaining_principal),
+                }
+            )
+            cur_date += payment_delta
+
+        return {
+            "mode": "fixed_term",
+            "repayment_frequency": repayment_frequency,
+            "total_payments": total_payments,
+            "payment_amount": float(payment_amount),
+            "term_months": term_months,
+            "total_interest": float(total_interest),
+            "total_repayment": float(total_repayment),
+            "schedule": schedule,
+            "breakdown_by_period": FlatRateProjector._group_by_period(
+                schedule, repayment_frequency
+            ),
+        }
+
+
+# ----------------------------------------------------------------------
+#  2. DIMINISHING BALANCE PROJECTOR
+# ----------------------------------------------------------------------
+class DiminishingProjector(_BaseProjector):
+    @staticmethod
+    def generate_projection_fixed_payment(
+        product: LoanProduct,
+        principal: Decimal,
+        monthly_payment: Decimal,
+        start_date: date,
+        repayment_frequency: str = "monthly",
+        max_term_months: int = 360,
+    ) -> Dict:
+        payment_delta = DiminishingProjector.FREQUENCY_TO_DELTA[repayment_frequency]
+        interest_delta = DiminishingProjector.FREQUENCY_TO_DELTA[
+            product.interest_period
+        ]
+
+        rate = product.interest_rate / Decimal("100")
+        schedule = []
+        current_balance = principal
+        total_interest = Decimal("0")
+        cur_date = start_date
+        months_elapsed = Decimal("0")
+
+        months_per_period = Decimal(
+            DiminishingProjector._months_per_period(repayment_frequency)
+        )
+        payment_per_period = (
+            monthly_payment * months_per_period
+            if repayment_frequency != "monthly"
+            else monthly_payment
+        ).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+        while current_balance > Decimal("0.01") and months_elapsed < max_term_months:
+            due_date = cur_date
+            interest_this_period = Decimal("0")
+            last_interest_calc = cur_date - payment_delta
+
+            while last_interest_calc < due_date:
+                calc_to = min(last_interest_calc + interest_delta, due_date)
+                time_frac = DiminishingProjector._time_fraction(
+                    last_interest_calc, calc_to, product.interest_period
+                )
+                period_interest = (current_balance * rate * time_frac).quantize(
+                    Decimal("0.01"), ROUND_HALF_UP
+                )
+                interest_this_period += period_interest
+                last_interest_calc = calc_to
+
+            interest_due = min(interest_this_period, payment_per_period)
+            principal_due = min(payment_per_period - interest_due, current_balance)
+            total_due = interest_due + principal_due
+
+            current_balance = (current_balance - principal_due).quantize(
+                Decimal("0.01"), ROUND_HALF_UP
+            )
+            total_interest += interest_due
+
+            schedule.append(
+                {
+                    "due_date": due_date.isoformat(),
+                    "principal_due": float(principal_due),
+                    "interest_due": float(interest_due),
+                    "total_due": float(total_due),
+                    "balance_after": float(current_balance),
+                }
+            )
+            cur_date += payment_delta
+            months_elapsed += months_per_period
+
+        total_payments = len(schedule)
+        term_months = (
+            int(months_elapsed.quantize(Decimal("1"), ROUND_HALF_UP)) if schedule else 0
+        )
+
+        return {
+            "mode": "fixed_payment",
+            "repayment_frequency": repayment_frequency,
+            "total_payments": total_payments,
+            "payment_amount": float(monthly_payment),
+            "term_months": term_months,
+            "total_interest": float(total_interest.quantize(Decimal("0.01"))),
+            "total_repayment": float(
+                (principal + total_interest).quantize(Decimal("0.01"))
+            ),
+            "schedule": schedule,
+            "breakdown_by_period": DiminishingProjector._group_by_period(
+                schedule, repayment_frequency
+            ),
+        }
+
+
+# ----------------------------------------------------------------------
+#  3. COMPOUND / CAPITALIZED PROJECTOR
+# ----------------------------------------------------------------------
+class CompoundProjector(_BaseProjector):
+    @staticmethod
+    def generate_projection_fixed_payment(
+        product: LoanProduct,
+        principal: Decimal,
+        monthly_payment: Decimal,
+        start_date: date,
+        repayment_frequency: str = "monthly",
+        max_term_months: int = 360,
+    ) -> Dict:
+        payment_delta = CompoundProjector.FREQUENCY_TO_DELTA[repayment_frequency]
+        interest_delta = CompoundProjector.FREQUENCY_TO_DELTA[product.interest_period]
+
+        rate = product.interest_rate / Decimal("100")
+        n = Decimal(str(product.compounding_frequency or 1))
+        schedule = []
+        current_balance = principal
+        total_interest = Decimal("0")
+        cur_date = start_date
+        months_elapsed = Decimal("0")
+
+        months_per_period = Decimal(
+            CompoundProjector._months_per_period(repayment_frequency)
+        )
+        payment_per_period = (
+            monthly_payment * months_per_period
+            if repayment_frequency != "monthly"
+            else monthly_payment
+        ).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+        while current_balance > Decimal("0.01") and months_elapsed < max_term_months:
+            due_date = cur_date
+            interest_this_period = Decimal("0")
+            temp_balance = current_balance
+            last_interest_calc = cur_date - payment_delta
+
+            while last_interest_calc < due_date:
+                calc_to = min(last_interest_calc + interest_delta, due_date)
+                time_frac = CompoundProjector._time_fraction(
+                    last_interest_calc, calc_to, product.interest_period
+                )
+
+                period_interest = temp_balance * (
+                    (Decimal("1") + rate / n) ** (n * time_frac) - Decimal("1")
+                )
+                period_interest = period_interest.quantize(
+                    Decimal("0.01"), ROUND_HALF_UP
+                )
+
+                interest_this_period += period_interest
+                temp_balance += period_interest  # compound on temp only
+                last_interest_calc = calc_to
+
+            # ----- amortize -----
+            interest_due = min(interest_this_period, payment_per_period)
+            remaining = payment_per_period - interest_due
+            principal_due = min(remaining, current_balance)
+            total_due = interest_due + principal_due
+
+            current_balance = (current_balance - principal_due).quantize(
+                Decimal("0.01"), ROUND_HALF_UP
+            )
+            total_interest += interest_due
+
+            # ----- capitalized adds interest AFTER payment -----
+            if product.interest_type == "capitalized":
+                current_balance += interest_this_period
+                current_balance = current_balance.quantize(
+                    Decimal("0.01"), ROUND_HALF_UP
+                )
+
+            schedule.append(
+                {
+                    "due_date": due_date.isoformat(),
+                    "principal_due": float(principal_due),
+                    "interest_due": float(interest_due),
+                    "total_due": float(total_due),
+                    "balance_after": float(current_balance),
+                }
+            )
+            cur_date += payment_delta
+            months_elapsed += months_per_period
+
+        total_payments = len(schedule)
+        term_months = (
+            int(months_elapsed.quantize(Decimal("1"), ROUND_HALF_UP)) if schedule else 0
+        )
+
+        return {
+            "mode": "fixed_payment",
+            "repayment_frequency": repayment_frequency,
+            "total_payments": total_payments,
+            "payment_amount": float(monthly_payment),
+            "term_months": term_months,
+            "total_interest": float(total_interest.quantize(Decimal("0.01"))),
+            "total_repayment": float(
+                (principal + total_interest).quantize(Decimal("0.01"))
+            ),
+            "schedule": schedule,
+            "breakdown_by_period": CompoundProjector._group_by_period(
+                schedule, repayment_frequency
+            ),
+        }

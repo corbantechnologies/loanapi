@@ -1,9 +1,17 @@
 from django.urls import path
 
-from loanapplications.views import LoanProjectionView
+from loanapplications.views import FlatRateProjectionView, DiminishingProjectionView, CompoundProjectionView
 
 app_name = "loanapplications"
 
 urlpatterns = [
-    path("loan-projection/", LoanProjectionView.as_view(), name="loan-projection"),
+    path("flat/", FlatRateProjectionView.as_view(), name="flat-projection"),
+    path(
+        "diminishing/",
+        DiminishingProjectionView.as_view(),
+        name="diminishing-projection",
+    ),
+    path(
+        "compound/", CompoundProjectionView.as_view(), name="compound-projection"
+    ),
 ]
