@@ -36,6 +36,11 @@ INSTALLED_APPS = [
     "cloudinary",
     # Local apps
     "accounts",
+    "loanproducts",
+    "loanaccounts",
+    "interests",
+    "loanapplications",
+    "repayments",
 ]
 
 MIDDLEWARE = [

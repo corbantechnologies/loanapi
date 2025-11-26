@@ -38,7 +38,7 @@ def send_registration_confirmation_email(user):
             {"user": user, "current_year": current_year},
         )
         params = {
-            "from": "Wananchi Mali SACCO <onboarding@wananchimali.com>",
+            "from": "Wananchi Mali SACCO <onboarding@corbantechnologies.org>",
             "to": [user.email],
             "subject": "Registration Confirmation",
             "html": email_body,
@@ -72,7 +72,7 @@ def send_member_number_email(user):
             },
         )
         params = {
-            "from": "Wananchi Mali SACCO <onboarding@wananchimali.com>",
+            "from": "Wananchi Mali SACCO <onboarding@corbantechnologies.org>",
             "to": [user.email],
             "subject": "Your Membership Number",
             "html": email_body,
